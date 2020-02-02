@@ -610,9 +610,15 @@ def binned_statistic_dd(sample, values, statistic='mean',
             except Exception:
                 null = np.nan
         result.fill(null)
-        for i in np.unique(binnumbers):
-            for vv in builtins.range(Vdim):
-                result[vv, i] = statistic(values[vv, binnumbers == i])
+        vfs = values[self.argsort_index]
+        i = 0
+        for j, k in enumerate(self.flatcount):
+            if k > 0:
+                self.result[j] = internal_statistic(vfs[i: i + k])
+            i += k
+        # for i in np.unique(binnumbers):
+        #     for vv in builtins.range(Vdim):
+        #         result[vv, i] = statistic(values[vv, binnumbers == i])
 
     # Shape into a proper matrix
     result = result.reshape(np.append(Vdim, nbin))
