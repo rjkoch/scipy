@@ -352,8 +352,168 @@ def binned_statistic_2d(x, y, values, statistic='mean',
 BinnedStatisticddResult = namedtuple('BinnedStatisticddResult',
                                      ('statistic', 'bin_edges',
                                       'binnumber'))
+class memoize(dict):
+    def __init__(self, sample, statistic='mean',
+                 bins=10, range=None, mask=None):
+        self.func = func
+        # This code is based on np.histogramdd
+        try:
+            # Sample is an ND-array.
+            N, self.D = sample.shape
+        except (AttributeError, ValueError):
+            # Sample is a sequence of 1D arrays.
+            sample = np.atleast_2d(sample).T
+            N, self.D = sample.shape
 
+        self.nbin = np.empty(self.D, int)
+        self.edges = self.D * [None]
+        self._centers = self.D * [None]
+        dedges = self.D * [None]
 
+        try:
+            M = len(bins)
+            if M != self.D:
+                raise AttributeError('The dimension of bins must be equal '
+                                     'to the dimension of the sample x.')
+        except TypeError:
+            bins = self.D * [bins]
+
+        # Select range for each dimension
+        # Used only if number of bins is given.
+        if range is None:
+            smin = np.atleast_1d(np.array(sample.min(0), float))
+            smax = np.atleast_1d(np.array(sample.max(0), float))
+        else:
+            smin = np.zeros(self.D)
+            smax = np.zeros(self.D)
+            for i in np.arange(self.D):
+                smin[i], smax[i] = range[i]
+
+        # Make sure the bins have a finite width.
+        for i in np.arange(len(smin)):
+            if smin[i] == smax[i]:
+                smin[i] = smin[i] - .5
+                smax[i] = smax[i] + .5
+
+        # Create edge arrays
+        for i in np.arange(self.D):
+            if np.isscalar(bins[i]):
+                self.nbin[i] = bins[i] + 2  # +2 for outlier bins
+                self.edges[i] = np.linspace(smin[i], smax[i], self.nbin[i] - 1)
+            else:
+                self.edges[i] = np.asarray(bins[i], float)
+                self.nbin[i] = len(self.edges[i]) + 1  # +1 for outlier bins
+            self._centers[i] = bin_edges_to_centers(self.edges[i])
+            dedges[i] = np.diff(self.edges[i])
+
+        self.nbin = np.asarray(self.nbin)
+
+        # Compute the bin number each sample falls into.
+        Ncount = {}
+        for i in np.arange(self.D):
+            # Apply mask in a non-ideal way by setting value outside range.
+            # Would be better to do this using bincount "weights", perhaps.
+            thissample = sample[:, i]
+            if mask is not None:
+                thissample[mask == 0] = (self.edges[i][0] -
+                                         0.01 * (
+                                             1 + np.fabs(self.edges[i][0])))
+            Ncount[i] = np.digitize(thissample, self.edges[i])
+
+        # Using digitize, values that fall on an edge are put in the
+        # right bin.  For the rightmost bin, we want values equal to
+        # the right edge to be counted in the last bin, and not as an
+        # outlier.
+
+        for i in np.arange(self.D):
+            # Rounding precision
+            decimal = int(-np.log10(dedges[i].min())) + 6
+            # Find which points are on the rightmost edge.
+            on_edge = np.where(np.around(sample[:, i], decimal) ==
+                               np.around(self.edges[i][-1], decimal))[0]
+            # Shift these points one bin to the left.
+            Ncount[i][on_edge] -= 1
+
+        # Compute the sample indices in the flattened statistic matrix.
+        self.ni = self.nbin.argsort()
+        self.xy = np.zeros(N, int)
+        for i in np.arange(0, self.D - 1):
+            self.xy += Ncount[self.ni[i]] * self.nbin[self.ni[i + 1:]].prod()
+        self.xy += Ncount[self.ni[-1]]
+        self._flatcount = None  # will be computed if needed
+        self._argsort_index = None
+        self.statistic = statistic
+
+    @property
+    def binmap(self):
+        ''' Return the map of the bins per dimension.
+                i.e. reverse transformation of flattened to unflattened bins
+            Returns
+            -------
+            D np.ndarrays of length N where D is the number of dimensions
+                and N is the number of data points.
+                For each dimension, the min bin id is 0 and max n+1 where n is
+                the number of bins in that dimension. The ids 0 and n+1 mark
+                the outliers of the bins.
+        '''
+        N, = self.xy.shape
+        binmap = np.zeros((self.D, N), dtype=int)
+        denominator = 1
+
+        for i in range(self.D):
+            ind = self.D - i - 1
+            subbinmap = (self.xy // denominator)
+            if i < self.D - 1:
+                subbinmap = subbinmap % self.nbin[self.ni[ind - 1]]
+            binmap[ind] = subbinmap
+            denominator *= self.nbin[self.ni[ind]]
+
+        return binmap
+
+    @property
+    def flatcount(self):
+        # Compute flatcount the first time it is accessed. Some statistics
+        # never access it.
+        if self._flatcount is None:
+            self._flatcount = np.bincount(self.xy, None)
+        return self._flatcount
+
+    @property
+    def argsort_index(self):
+        # Compute argsort the first time it is accessed. Some statistics
+        # never access it.
+        if self._argsort_index is None:
+            self._argsort_index = self.xy.argsort()
+        return self._argsort_index
+
+    @property
+    def bin_edges(self):
+        """
+        bin_edges : array of dtype float
+        Return the bin edges ``(length(statistic)+1)``.
+        """
+        return self.edges
+
+    @property
+    def bin_centers(self):
+        """
+        bin_centers : array of dtype float
+        Return the bin centers ``(length(statistic))``.
+        """
+        return self._centers
+
+    @property
+    def statistic(self):
+        return self._statistic
+
+    @statistic.setter
+    def statistic(self, new_statistic):
+        if not callable(new_statistic) and new_statistic not in self.std_:
+            raise ValueError('invalid statistic %r' % (new_statistic,))
+        else:
+            self._statistic = new_statistic
+
+@memoize
 def binned_statistic_dd(sample, values, statistic='mean',
                         bins=10, range=None, expand_binnumbers=False,
                         binned_statistic_result=None):
@@ -610,15 +770,45 @@ def binned_statistic_dd(sample, values, statistic='mean',
             except Exception:
                 null = np.nan
         result.fill(null)
-        vfs = values[self.argsort_index]
+        # Compute the bin number each sample falls into.
+        ncount = {}
+        for i in np.arange(Dlen):
+            # Apply mask in a non-ideal way by setting value outside range.
+            # Would be better to do this using bincount "weights", perhaps.
+            thissample = sample[:, i]
+            ncount[i] = np.digitize(thissample, edges[i])
+
+        # Using digitize, values that fall on an edge are put in the
+        # right bin.  For the rightmost bin, we want values equal to
+        # the right edge to be counted in the last bin, and not as an
+        # outlier.
+
+        for i in np.arange(Dlen):
+            # Rounding precision
+            decimal = int(-np.log10(dedges[i].min())) + 6
+            # Find which points are on the rightmost edge.
+            on_edge = np.where(np.around(sample[:, i], decimal) ==
+                               np.around(edges[i][-1], decimal))[0]
+            # Shift these points one bin to the left.
+            ncount[i][on_edge] -= 1
         i = 0
-        for j, k in enumerate(self.flatcount):
+        ni = nbin.argsort()
+        xy = np.zeros(Ndim, int)
+        for i in np.arange(0, Dlen - 1):
+            xy += ncount[ni[i]] * nbin[ni[i + 1:]].prod()
+        xy += ncount[ni[-1]]
+
+        argsort_index = xy.argsort()
+        vfs = values[argsort_index]
+        flatcount = np.bincount(xy, None)
+        for j, k in enumerate(flatcount):
             if k > 0:
-                self.result[j] = internal_statistic(vfs[i: i + k])
+                result[j,] = statistic(vfs[i: i + k])
             i += k
-        # for i in np.unique(binnumbers):
-        #     for vv in builtins.range(Vdim):
-        #         result[vv, i] = statistic(values[vv, binnumbers == i])
+
+        for i in np.unique(binnumbers):
+            for vv in builtins.range(Vdim):
+                result[vv, i] = statistic(values[vv, binnumbers == i])
 
     # Shape into a proper matrix
     result = result.reshape(np.append(Vdim, nbin))
