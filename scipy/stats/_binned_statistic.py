@@ -603,6 +603,7 @@ def binned_statistic_dd(sample, values, statistic='mean',
             for vv in builtins.range(Vdim):
                 result[vv, i] = np.max(values[vv, binnumbers == i])
     elif callable(statistic):
+        result = np.empty(nbin.prod(), float)
         with np.errstate(invalid='ignore'), suppress_warnings() as sup:
             sup.filter(RuntimeWarning)
             try:
@@ -610,19 +611,7 @@ def binned_statistic_dd(sample, values, statistic='mean',
             except Exception:
                 null = np.nan
         result.fill(null)
-        vfs = values[argsort_index]
-        flatcount = np.bincount(binnumbers, None)
-        a = flatcount.nonzero()
-        for i in np.unique(binnumbers):
-            for vv in builtins.range(Vdim):
-                # NOTE: take std dev by bin, np.std() is 2-pass and stable
-                result[vv, i] = np.std(values[vv, binnumbers == i])
 
-        for i in np.unique(binnumbers):
-            for vv in builtins.range(Vdim):
-                 result[vv, i] = statistic(values[vv, binnumbers == i])
-
-                    self.result.fill(null)
         # legacy code
         # result.fill(null)
         # for i in np.unique(binnumbers):
@@ -639,35 +628,67 @@ def binned_statistic_dd(sample, values, statistic='mean',
         #         result[vv, i] = np.std(values[vv, binnumbers == i])
 
         # beam code
-        # ni = nbin.argsort()
-        # xy = np.zeros(N, int)
-        # for i in np.arange(0, D - 1):
-        #     xy += Ncount[ni[i]] * nbin[ni[i + 1:]].prod()
-        # xy += Ncount[ni[-1]]
-        # argsort_index = xy.argsort()
-        # vfs = values[argsort_index]
-        # i = 0
-        # for j, k in enumerate(flatcount):
-        #     if k > 0:
-        #         result[j] = internal_statistic(vfs[i: i + k])
-        #     i += k
+        # Trying this beam code
+        # get indices which would sort the nbin array
+        # nbin is the number of bins in each dimension, + 1 for outliers
+        ni = nbin.argsort()
 
-    # Shape into a proper matrix
-    result = result.reshape(np.append(Vdim, nbin))
+        # What is xy...?
+        # Clearly it's a holder of integer that's Ndim long...duh!
+        xy = np.zeros(Ndim, int)
 
-    # Remove outliers (indices 0 and -1 for each bin-dimension).
-    core = tuple([slice(None)] + Ndim * [slice(1, -1)])
-    result = result[core]
+        # So here we are looping over all D in our ND sample
+        for i in np.arange(0, Dlen - 1):
+            # Now what the hell is ncount?
+            # thats dumb. Ncount is binnumbers
+            # So xy accumulates the product of certain bin number elements. Which?
+            # 
+            xy += binnumbers[ni[i]] * nbin[ni[i + 1:]].prod()
+        xy += binnumbers[ni[-1]]
+        argsort_index = xy.argsort()
+        flatcount = np.bincount(xy, None)
+        vfs = values[argsort_index]
+        i = 0
+        for j, k in enumerate(flatcount):
+            if k > 0:
+                result[j] = statistic(vfs[i: i + k])
+            i += k
 
-    # Unravel binnumbers into an ndarray, each row the bins for each dimension
-    if(expand_binnumbers and Ndim > 1):
-        binnumbers = np.asarray(np.unravel_index(binnumbers, nbin))
+        # Shape into a proper matrix
+        result = result.reshape(np.sort(nbin))
+        ni = np.copy(ni)
+        for i in np.arange(nbin.size):
+            j = ni.argsort()[i]
+            result = result.swapaxes(i, j)
+            ni[i], ni[j] = ni[j], ni[i]
 
-    if np.any(result.shape[1:] != nbin - 2):
-        raise RuntimeError('Internal Shape Error')
+        # Remove outliers (indices 0 and -1 for each dimension).
+        core = Dlen * [slice(1, -1)]
+        result = result[tuple(core)]
 
-    # Reshape to have output (`reulst`) match input (`values`) shape
-    result = result.reshape(input_shape[:-1] + list(nbin-2))
+        if (result.shape != nbin - 2).any():
+            raise RuntimeError('Internal Shape Error')
+
+    # This is less than ideal.
+    # we have two different paradigms for the shape of the result
+    # we should probably not do that...
+    if not callable(statistic):
+        # Shape into a proper matrix
+        result = result.reshape(np.append(Vdim, nbin))
+
+        # Remove outliers (indices 0 and -1 for each bin-dimension).
+        core = tuple([slice(None)] + Ndim * [slice(1, -1)])
+        result = result[core]
+
+        # Unravel binnumbers into an ndarray, each row the bins for each dimension
+        if(expand_binnumbers and Ndim > 1):
+            binnumbers = np.asarray(np.unravel_index(binnumbers, nbin))
+
+        if np.any(result.shape[1:] != nbin - 2):
+            raise RuntimeError('Internal Shape Error')
+
+        # Reshape to have output (`reulst`) match input (`values`) shape
+        result = result.reshape(input_shape[:-1] + list(nbin-2))
 
     return BinnedStatisticddResult(result, edges, binnumbers)
 
